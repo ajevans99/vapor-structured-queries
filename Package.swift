@@ -20,6 +20,10 @@ let package = Package(
       name: "VaporStructuredQueriesTestSupport",
       targets: ["VaporStructuredQueriesTestSupport"]
     ),
+    .library(
+      name: "VaporStructuredQueriesSQLite",
+      targets: ["VaporStructuredQueriesSQLite"]
+    ),
   ],
   dependencies: [
     .package(url: "https://github.com/vapor/vapor.git", from: "4.115.0"),
@@ -51,11 +55,19 @@ let package = Package(
         .product(name: "StructuredQueries", package: "swift-structured-queries"),
       ]
     ),
+    .target(
+      name: "VaporStructuredQueriesSQLite",
+      dependencies: [
+        .target(name: "VaporStructuredQueries"),
+        .product(name: "StructuredQueriesSQLite", package: "swift-structured-queries"),
+      ]
+    ),
     .testTarget(
       name: "VaporStructuredQueriesTests",
       dependencies: [
         .target(name: "VaporStructuredQueries"),
         .target(name: "VaporStructuredQueriesPostgresNIO"),
+        .target(name: "VaporStructuredQueriesSQLite"),
         .target(name: "VaporStructuredQueriesTestSupport"),
         .product(name: "VaporTesting", package: "vapor"),
       ]

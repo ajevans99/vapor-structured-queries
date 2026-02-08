@@ -18,6 +18,7 @@ If you know [FluentKit](https://github.com/vapor/fluent-kit), the API style here
 
 - `VaporStructuredQueries`: core runtime, Vapor wiring, migrations, statement execution helpers.
 - `VaporStructuredQueriesPostgresNIO`: Postgres driver implementation.
+- `VaporStructuredQueriesSQLite`: SQLite driver implementation using StructuredQueries' SQLite driver.
 - `VaporStructuredQueriesTestSupport`: fake database utilities for unit tests.
 
 ## Quick start
@@ -45,6 +46,17 @@ In handlers, execute statements on `req.db`:
 
 ```swift
 let rows = try await #sql("SELECT \(bind: 1)", as: Int.self).all(on: req.db)
+```
+
+SQLite example:
+
+```swift
+import VaporStructuredQueriesSQLite
+
+func configureSQLite(_ app: Application) async throws {
+  app.database.use(.sqlite(path: "/tmp/app.sqlite"), as: .sqlite)
+  app.database.default(to: .sqlite)
+}
 ```
 
 ## Builder-style StructuredQueries examples
