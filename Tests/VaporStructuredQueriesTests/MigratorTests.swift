@@ -30,7 +30,7 @@ struct MigratorTests {
     let database = FakeDatabase()
 
     try await withApp { app in
-      app.database.use(
+      try await app.database.use(
         .init { _, _ in database },
         as: "test"
       )
@@ -67,7 +67,7 @@ struct MigratorTests {
     )
 
     try await withApp { app in
-      app.database.use(
+      try await app.database.use(
         .init { _, _ in database },
         as: "test"
       )
@@ -88,8 +88,8 @@ struct MigratorTests {
     let analyticsDatabase = FakeDatabase()
 
     try await withApp { app in
-      app.database.use(.init { _, _ in defaultDatabase }, as: "default")
-      app.database.use(.init { _, _ in analyticsDatabase }, as: "analytics")
+      try await app.database.use(.init { _, _ in defaultDatabase }, as: "default")
+      try await app.database.use(.init { _, _ in analyticsDatabase }, as: "analytics")
       app.database.default(to: "default")
       app.migrations.add(CreateWidgetsMigration(), to: "default")
       app.migrations.add(CreateWidgetsMigration(), to: "analytics")

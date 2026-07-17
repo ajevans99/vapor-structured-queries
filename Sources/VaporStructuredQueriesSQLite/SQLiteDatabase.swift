@@ -1,14 +1,18 @@
 import Foundation
+import Logging
 import SQLite3
 import StructuredQueriesSQLite
 import VaporStructuredQueries
 
 final class SQLiteDatabase: VaporStructuredQueries.Database, @unchecked Sendable {
+  let logger: Logger
+
   private let lock = NSLock()
   private var driver: SQLiteDriver?
   private let initializationError: Error?
 
-  init(path: String) {
+  init(path: String, logger: Logger) {
+    self.logger = logger
     do {
       self.driver = try SQLiteDriver(path: path)
       self.initializationError = nil
@@ -18,30 +22,82 @@ final class SQLiteDatabase: VaporStructuredQueries.Database, @unchecked Sendable
     }
   }
 
-  func all<S: Statement>(_ statement: S) async throws -> [S.QueryValue.QueryOutput]
-  where S.QueryValue: QueryRepresentable, S.QueryValue.QueryOutput: Sendable {
+  func stream<S: Statement>(
+    _ statement: S,
+    context: DatabaseExecutionContext
+  ) async throws -> DatabaseRowStream<S.QueryValue.QueryOutput>
+  where
+    S.QueryValue: QueryRepresentable,
+    S.QueryValue.QueryOutput: Sendable
+  {
+    let rows = try self.withDriver { driver in
+      try driver.execute(statement)
+    }
+    return DatabaseRowStream(SQLiteRows(rows))
+  }
+
+  func execute<S: Statement>(
+    _ statement: S,
+    context: DatabaseExecutionContext
+  ) async throws -> DatabaseCommandMetadata?
+  where S.QueryValue == () {
     try self.withDriver { driver in
       try driver.execute(statement)
     }
+    return nil
   }
 
-  func first<S: Statement>(_ statement: S) async throws -> S.QueryValue.QueryOutput?
-  where S.QueryValue: QueryRepresentable, S.QueryValue.QueryOutput: Sendable {
-    try self.withDriver { driver in
-      try driver.execute(statement).first
+  func withConnection<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    throw DatabaseRuntimeError.unsupportedOperation(.connection)
+  }
+
+  func withTransaction<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    throw DatabaseRuntimeError.unsupportedOperation(.transaction)
+  }
+
+  func checkReadiness(
+    context: DatabaseExecutionContext,
+    timeout: Duration
+  ) async throws {
+    try Task.checkCancellation()
+    _ = try self.withDriver { driver in
+      try driver.execute(#sql("SELECT 1", as: Int.self))
+    }
+    try Task.checkCancellation()
+  }
+
+  func shutdown() async throws {
+    self.lock.withLock {
+      self.driver = nil
     }
   }
 
-  func execute(_ statement: some Statement<()>) async throws {
-    try self.withDriver { driver in
-      try driver.execute(statement)
-    }
-  }
+  private struct SQLiteRows<Element: Sendable>: AsyncSequence, Sendable {
+    let elements: [Element]
 
-  func shutdown() {
-    self.lock.lock()
-    self.driver = nil
-    self.lock.unlock()
+    init(_ elements: [Element]) {
+      self.elements = elements
+    }
+
+    struct AsyncIterator: AsyncIteratorProtocol {
+      var iterator: IndexingIterator<[Element]>
+
+      mutating func next() async -> Element? {
+        self.iterator.next()
+      }
+    }
+
+    func makeAsyncIterator() -> AsyncIterator {
+      AsyncIterator(iterator: self.elements.makeIterator())
+    }
   }
 
   private func withDriver<T>(_ operation: (SQLiteDriver) throws -> T) throws -> T {

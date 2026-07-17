@@ -6,8 +6,8 @@ extension DatabaseConfigurationFactory {
   /// - Parameter path: Path to the SQLite file. Use `:memory:` for in-memory DB.
   /// - Returns: A database configuration factory.
   public static func sqlite(path: String = ":memory:") -> Self {
-    .init { _, _ in
-      SQLiteDatabase(path: path)
+    .init { _, logger in
+      SQLiteDatabase(path: path, logger: logger)
     }
   }
 }

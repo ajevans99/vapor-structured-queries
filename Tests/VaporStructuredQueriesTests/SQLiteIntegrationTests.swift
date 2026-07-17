@@ -8,7 +8,7 @@ struct SQLiteIntegrationTests {
   @Test("sqlite query flow")
   func sqliteQueryFlow() async throws {
     try await withApp { app in
-      app.database.use(.sqlite(path: ":memory:"), as: .sqlite)
+      try await app.database.use(.sqlite(path: ":memory:"), as: .sqlite)
       app.database.default(to: .sqlite)
 
       let tableName = "vsq_temp_sqlite"
@@ -45,6 +45,22 @@ struct SQLiteIntegrationTests {
       )
       .first(on: app.db)
       #expect(count == 0)
+    }
+  }
+
+  @Test("sqlite readiness and unsupported atomic APIs")
+  func sqliteRuntimeCapabilities() async throws {
+    try await withApp { app in
+      try await app.database.use(.sqlite(path: ":memory:"), as: .sqlite)
+      app.database.default(to: .sqlite)
+
+      try await app.db.checkReadiness()
+      await #expect(throws: DatabaseRuntimeError.unsupportedOperation(.connection)) {
+        try await app.db.withConnection { _ in () }
+      }
+      await #expect(throws: DatabaseRuntimeError.unsupportedOperation(.transaction)) {
+        try await app.db.withTransaction { _ in () }
+      }
     }
   }
 }

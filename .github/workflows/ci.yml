@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         platform: [linux, macos]
-        swift: ["6.0"]
+        swift: ["6.1"]
         include:
           - platform: linux
             os: ubuntu-latest
@@ -24,6 +24,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Install Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: ${{ matrix.swift }}
 
       - name: Cache SwiftPM
         uses: actions/cache@v5
@@ -41,8 +46,36 @@ jobs:
       - name: Swift version
         run: swift --version
 
+      - name: Install Postgres (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql
+          sudo systemctl start postgresql
+          sudo -u postgres psql --set ON_ERROR_STOP=1 --command "CREATE ROLE vapor LOGIN PASSWORD 'vapor';"
+          sudo -u postgres createdb --owner vapor vapor_testing
+
+      - name: Install Postgres (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install postgresql@16
+          echo "$(brew --prefix postgresql@16)/bin" >> "$GITHUB_PATH"
+          brew services start postgresql@16
+          until "$(brew --prefix postgresql@16)/bin/pg_isready"; do sleep 1; done
+          "$(brew --prefix postgresql@16)/bin/createuser" vapor
+          "$(brew --prefix postgresql@16)/bin/createdb" --owner vapor vapor_testing
+          "$(brew --prefix postgresql@16)/bin/psql" postgres \
+            --set ON_ERROR_STOP=1 \
+            --command "ALTER ROLE vapor PASSWORD 'vapor';"
+
       - name: Build
         run: swift build -v
 
       - name: Test
         run: swift test -v
+        env:
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: 5432
+          POSTGRES_USER: vapor
+          POSTGRES_PASSWORD: vapor
+          POSTGRES_DB: vapor_testing

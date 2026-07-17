@@ -60,7 +60,7 @@ extension Application {
       reason =
         "No default database is configured. Call app.database.use(..., as:) and app.database.default(to:)."
     }
-    return UnconfiguredDatabase(reason: reason)
+    return UnconfiguredDatabase(reason: reason, logger: logger)
   }
 
   /// All configured database registries for this application.
@@ -102,8 +102,12 @@ extension Application {
       let migrations: Migrations
       let migrationLogLevel: NIOLockedValueBox<Logger.Level>
 
-      init(on eventLoopGroup: any EventLoopGroup, migrationLogLevel: Logger.Level) {
-        self.databases = Databases(on: eventLoopGroup)
+      init(
+        on eventLoopGroup: any EventLoopGroup,
+        logger: Logger,
+        migrationLogLevel: Logger.Level
+      ) {
+        self.databases = Databases(on: eventLoopGroup, logger: logger)
         self.migrations = .init()
         self.migrationLogLevel = .init(migrationLogLevel)
       }
@@ -154,12 +158,15 @@ extension Application {
         }
       }
 
-      func shutdown(_ application: Application) {
-        application.databases.shutdown()
-      }
-
       func shutdownAsync(_ application: Application) async {
-        application.databases.shutdown()
+        do {
+          try await application.databases.shutdown()
+        } catch {
+          application.logger.error(
+            "Database shutdown failed",
+            metadata: ["error": "\(String(reflecting: error))"]
+          )
+        }
       }
     }
 
@@ -175,6 +182,7 @@ extension Application {
     func initialize() {
       self.application.storage[Key.self] = .init(
         on: self.application.eventLoopGroup,
+        logger: self.application.logger,
         migrationLogLevel: .info
       )
       self.application.lifecycle.use(Lifecycle())
@@ -186,8 +194,12 @@ extension Application {
     /// - Parameters:
     ///   - configurationFactory: The configuration factory.
     ///   - id: The database identifier.
-    public func use(_ configurationFactory: DatabaseConfigurationFactory, as id: DatabaseID) {
-      self.storage.databases.use(configurationFactory, as: id)
+    /// - Throws: An error if a replaced database cannot shut down.
+    public func use(
+      _ configurationFactory: DatabaseConfigurationFactory,
+      as id: DatabaseID
+    ) async throws {
+      try await self.storage.databases.use(configurationFactory, as: id)
     }
 
     /// Sets the default database identifier.
@@ -214,20 +226,49 @@ extension Application {
 
 private struct UnconfiguredDatabase: Database {
   let reason: String
+  let logger: Logger
 
-  func all<S: Statement>(_ statement: S) async throws -> [S.QueryValue.QueryOutput]
-  where S.QueryValue: QueryRepresentable, S.QueryValue.QueryOutput: Sendable {
+  func stream<S: Statement>(
+    _ statement: S,
+    context: DatabaseExecutionContext
+  ) async throws -> DatabaseRowStream<S.QueryValue.QueryOutput>
+  where
+    S.QueryValue: QueryRepresentable,
+    S.QueryValue.QueryOutput: Sendable
+  {
     throw Abort(.internalServerError, reason: self.reason)
   }
 
-  func first<S: Statement>(_ statement: S) async throws -> S.QueryValue.QueryOutput?
-  where S.QueryValue: QueryRepresentable, S.QueryValue.QueryOutput: Sendable {
+  func execute<S: Statement>(
+    _ statement: S,
+    context: DatabaseExecutionContext
+  ) async throws -> DatabaseCommandMetadata?
+  where S.QueryValue == () {
     throw Abort(.internalServerError, reason: self.reason)
   }
 
-  func execute(_ statement: some Statement<()>) async throws {
+  func withConnection<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
     throw Abort(.internalServerError, reason: self.reason)
   }
 
-  func shutdown() {}
+  func withTransaction<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    throw Abort(.internalServerError, reason: self.reason)
+  }
+
+  func checkReadiness(
+    context: DatabaseExecutionContext,
+    timeout: Duration
+  ) async throws {
+    throw Abort(.internalServerError, reason: self.reason)
+  }
+
+  func shutdown() async throws {}
 }
