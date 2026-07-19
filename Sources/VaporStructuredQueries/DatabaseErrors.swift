@@ -42,6 +42,9 @@ public enum DatabaseOperation: String, Equatable, Sendable {
   /// Running a transaction.
   case transaction
 
+  /// Serializing and atomically running database migrations.
+  case migrationLock
+
   /// Checking readiness.
   case readiness
 

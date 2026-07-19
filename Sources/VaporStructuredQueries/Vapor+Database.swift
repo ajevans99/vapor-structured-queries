@@ -85,13 +85,16 @@ extension Application {
 
   /// Runs all pending migrations.
   public func autoMigrate() async throws {
-    try await self.migrator.setupIfNeeded()
     try await self.migrator.prepareBatch()
   }
 
-  /// Reverts all prepared migrations.
+  /// Reverts the latest applied migration batch.
   public func autoRevert() async throws {
-    try await self.migrator.setupIfNeeded()
+    try await self.migrator.revertLastBatch()
+  }
+
+  /// Reverts every applied migration batch.
+  public func revertAllMigrationBatches() async throws {
     try await self.migrator.revertAllBatches()
   }
 
@@ -127,7 +130,8 @@ extension Application {
 
         @Flag(
           name: "auto-revert",
-          help: "If true, VaporStructuredQueries will automatically revert your database on boot"
+          help:
+            "If true, VaporStructuredQueries will automatically revert the latest migration batch on boot"
         )
         var autoRevert: Bool
       }

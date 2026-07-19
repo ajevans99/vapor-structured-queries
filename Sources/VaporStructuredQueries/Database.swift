@@ -3,6 +3,9 @@ import StructuredQueries
 
 /// A runtime database capable of executing StructuredQueries statements.
 public protocol Database: Sendable {
+  /// The migration schema dialect supported by this database.
+  var migrationDialect: DatabaseMigrationDialect { get }
+
   /// The default logger for operations on this database handle.
   var logger: Logger { get }
 
@@ -43,6 +46,13 @@ public protocol Database: Sendable {
 
   /// Runs an operation atomically on one database connection.
   func withTransaction<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result
+
+  /// Serializes and atomically executes migration work.
+  func withMigrationLock<Result: Sendable>(
     context: DatabaseExecutionContext,
     isolation: isolated (any Actor)?,
     _ operation: (any Database) async throws -> sending Result
@@ -92,7 +102,31 @@ public struct DatabaseCommandMetadata: Equatable, Sendable {
   }
 }
 
+/// SQL schema behavior available to the migration runtime.
+public enum DatabaseMigrationDialect: String, Equatable, Sendable {
+  /// The driver has not implemented production-safe migrations.
+  case unsupported
+
+  /// PostgreSQL migration schema behavior.
+  case postgres
+
+  /// SQLite migration schema behavior.
+  case sqlite
+}
+
 extension Database {
+  public var migrationDialect: DatabaseMigrationDialect {
+    .unsupported
+  }
+
+  public func withMigrationLock<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    throw DatabaseRuntimeError.unsupportedOperation(.migrationLock)
+  }
+
   /// Streams rows decoded from a statement.
   public func stream<S: Statement>(
     _ statement: S,
@@ -194,6 +228,24 @@ extension Database {
     _ operation: (any Database) async throws -> sending Result
   ) async throws -> sending Result {
     try await self.withTransaction(
+      context: .init(logger: logger ?? self.logger, file: file, line: line),
+      isolation: isolation,
+      operation
+    )
+  }
+
+  /// Serializes migration runners and runs an operation atomically.
+  ///
+  /// Drivers must only implement this operation when the serialization spans
+  /// independent application processes targeting the same database.
+  public func withMigrationLock<Result: Sendable>(
+    isolation: isolated (any Actor)? = #isolation,
+    logger: Logger? = nil,
+    file: String = #fileID,
+    line: Int = #line,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    try await self.withMigrationLock(
       context: .init(logger: logger ?? self.logger, file: file, line: line),
       isolation: isolation,
       operation

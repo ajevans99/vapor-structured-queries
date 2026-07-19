@@ -8,6 +8,10 @@ public struct DatabaseHandle: Database, Sendable {
   /// The default logger for operations through this handle.
   public let logger: Logger
 
+  public var migrationDialect: DatabaseMigrationDialect {
+    self.database.migrationDialect
+  }
+
   /// Creates a contextual handle around a database driver.
   public init(database: any Database, logger: Logger) {
     self.database = database
@@ -52,6 +56,19 @@ public struct DatabaseHandle: Database, Sendable {
     _ operation: (any Database) async throws -> sending Result
   ) async throws -> sending Result {
     try await self.database.withTransaction(
+      context: context,
+      isolation: isolation
+    ) { database in
+      try await operation(DatabaseHandle(database: database, logger: context.logger))
+    }
+  }
+
+  public func withMigrationLock<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    try await self.database.withMigrationLock(
       context: context,
       isolation: isolation
     ) { database in

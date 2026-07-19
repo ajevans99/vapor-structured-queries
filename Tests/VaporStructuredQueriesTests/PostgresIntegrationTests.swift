@@ -268,10 +268,321 @@ struct PostgresIntegrationTests {
       }
     }
   }
+
+  @Test("migration prepare and bookkeeping roll back atomically")
+  func migrationPrepareRollback() async throws {
+    try await withPostgresApp { app in
+      try await resetMigrationFixtures(on: app.db)
+      try await app.db.execute(
+        #sql(
+          """
+          CREATE TABLE "_database_migrations" (
+            "name" TEXT PRIMARY KEY,
+            "batch" BIGINT NOT NULL,
+            "sequence" BIGINT,
+            CHECK ("name" <> 'atomic-prepare')
+          )
+          """,
+          as: Void.self
+        )
+      )
+      app.migrations.add(CreateMigrationFixture(name: "atomic-prepare"))
+
+      await #expect(throws: (any Error).self) {
+        try await app.autoMigrate()
+      }
+      #expect(try await relationExists("vsq_migration_fixture", on: app.db) == false)
+      #expect(try await migrationRecordCount(on: app.db) == 0)
+    }
+  }
+
+  @Test("migration revert and bookkeeping roll back atomically")
+  func migrationRevertRollback() async throws {
+    try await withPostgresApp { app in
+      try await resetMigrationFixtures(on: app.db)
+      app.migrations.add(CreateMigrationFixture(name: "atomic-revert"))
+      try await app.autoMigrate()
+      try await app.db.execute(
+        #sql(
+          """
+          CREATE TABLE "vsq_migration_guard" (
+            "name" TEXT REFERENCES "_database_migrations" ("name")
+          )
+          """,
+          as: Void.self
+        )
+      )
+      try await app.db.execute(
+        #sql(
+          """
+          INSERT INTO "vsq_migration_guard" ("name")
+          VALUES ('atomic-revert')
+          """,
+          as: Void.self
+        )
+      )
+
+      await #expect(throws: (any Error).self) {
+        try await app.autoRevert()
+      }
+      #expect(try await relationExists("vsq_migration_fixture", on: app.db))
+      #expect(try await migrationRecordCount(on: app.db) == 1)
+    }
+  }
+
+  @Test("concurrent migration runners serialize and apply once")
+  func concurrentMigrationRunners() async throws {
+    try await withPostgresApp(maximumConnections: 2) { firstApp in
+      try await resetMigrationFixtures(on: firstApp.db)
+      try await withPostgresApp(maximumConnections: 2) { secondApp in
+        firstApp.migrations.add(CountedMigration(name: "serialized"))
+        secondApp.migrations.add(CountedMigration(name: "serialized"))
+
+        async let first: Void = firstApp.autoMigrate()
+        async let second: Void = secondApp.autoMigrate()
+        _ = try await (first, second)
+
+        #expect(try await migrationEventCount(on: firstApp.db) == 1)
+        #expect(try await migrationRecordCount(on: firstApp.db) == 1)
+      }
+    }
+  }
+
+  @Test("migration batches and legacy history preserve deterministic order")
+  func migrationOrderingAndLegacyUpgrade() async throws {
+    try await withPostgresApp { app in
+      try await resetMigrationFixtures(on: app.db)
+      try await app.db.execute(
+        #sql(
+          """
+          CREATE TABLE "_database_migrations" (
+            "name" TEXT PRIMARY KEY,
+            "batch" BIGINT NOT NULL
+          )
+          """,
+          as: Void.self
+        )
+      )
+      try await app.db.execute(
+        #sql(
+          """
+          INSERT INTO "_database_migrations" ("name", "batch")
+          VALUES ('registered-first', 1), ('alphabetical-first', 1)
+          """,
+          as: Void.self
+        )
+      )
+      app.migrations.add(
+        EventMigration(name: "registered-first"),
+        EventMigration(name: "alphabetical-first")
+      )
+      try await app.migrator.setupIfNeeded()
+      try await app.migrator.setupIfNeeded()
+
+      let sequences = try await #sql(
+        "SELECT \"sequence\" FROM \"_database_migrations\" ORDER BY \"name\"",
+        as: Int.self
+      )
+      .all(on: app.db)
+      #expect(sequences == [2, 1])
+
+      app.migrations.add(EventMigration(name: "batch-two-first"))
+      try await app.autoMigrate()
+      app.migrations.add(EventMigration(name: "batch-three-first"))
+      try await app.autoMigrate()
+      try await app.autoRevert()
+      try await app.revertAllMigrationBatches()
+
+      let events = try await #sql(
+        "SELECT \"value\" FROM \"vsq_migration_events\" ORDER BY \"id\"",
+        as: String.self
+      )
+      .all(on: app.db)
+      #expect(
+        events
+          == [
+            "prepare:batch-two-first",
+            "prepare:batch-three-first",
+            "revert:batch-three-first",
+            "revert:batch-two-first",
+            "revert:alphabetical-first",
+            "revert:registered-first",
+          ]
+      )
+    }
+  }
+
+  @Test("unknown history and cancellation roll back and permit retry")
+  func migrationUnknownCancellationAndRetry() async throws {
+    try await withPostgresApp(maximumConnections: 2) { app in
+      try await resetMigrationFixtures(on: app.db)
+      try await app.db.execute(
+        #sql(
+          """
+          CREATE TABLE "_database_migrations" (
+            "name" TEXT PRIMARY KEY,
+            "batch" BIGINT NOT NULL
+          )
+          """,
+          as: Void.self
+        )
+      )
+      try await app.db.execute(
+        #sql(
+          "INSERT INTO \"_database_migrations\" (\"name\", \"batch\") VALUES ('removed', 1)",
+          as: Void.self
+        )
+      )
+      app.migrations.add(CreateMigrationFixture(name: "current"))
+      await #expect(throws: MigrationError.self) {
+        try await app.autoMigrate()
+      }
+      #expect(try await columnExists("sequence", on: app.db) == false)
+
+      try await resetMigrationFixtures(on: app.db)
+      app.migrations.add(SlowMigration(name: "slow"))
+      let task = Task {
+        try await app.autoMigrate()
+      }
+      try await Task.sleep(for: .milliseconds(150))
+      task.cancel()
+      await #expect(throws: (any Error).self) {
+        try await task.value
+      }
+      #expect(try await relationExists("vsq_migration_fixture", on: app.db) == false)
+    }
+
+    try await withPostgresApp { retryApp in
+      retryApp.migrations.add(CreateMigrationFixture(name: "slow"))
+      try await retryApp.autoMigrate()
+      #expect(try await relationExists("vsq_migration_fixture", on: retryApp.db))
+      try await resetMigrationFixtures(on: retryApp.db)
+    }
+  }
+
+  @Test("non-transactional Postgres DDL is rejected without bookkeeping")
+  func nonTransactionalMigrationDDL() async throws {
+    try await withPostgresApp { app in
+      try await resetMigrationFixtures(on: app.db)
+      app.migrations.add(ConcurrentIndexMigration())
+
+      await #expect(throws: (any Error).self) {
+        try await app.autoMigrate()
+      }
+      #expect(try await relationExists("vsq_migration_fixture", on: app.db) == false)
+      #expect(try await relationExists("_database_migrations", on: app.db) == false)
+    }
+  }
 }
 
 private struct Rollback: Error {}
 private struct MissingPostgresConfiguration: Error {}
+
+private struct CreateMigrationFixture: AsyncMigration {
+  let name: String
+
+  func prepare(on database: any Database) async throws {
+    try await database.execute(
+      #sql("CREATE TABLE \"vsq_migration_fixture\" (\"id\" BIGINT PRIMARY KEY)", as: Void.self)
+    )
+  }
+
+  func revert(on database: any Database) async throws {
+    try await database.execute(#sql("DROP TABLE \"vsq_migration_fixture\"", as: Void.self))
+  }
+}
+
+private struct CountedMigration: AsyncMigration {
+  let name: String
+
+  func prepare(on database: any Database) async throws {
+    try await database.execute(
+      #sql(
+        """
+        CREATE TABLE IF NOT EXISTS "vsq_migration_events" (
+          "id" BIGSERIAL PRIMARY KEY,
+          "value" TEXT NOT NULL
+        )
+        """,
+        as: Void.self
+      )
+    )
+    try await database.execute(
+      #sql(
+        "INSERT INTO \"vsq_migration_events\" (\"value\") VALUES ('applied')",
+        as: Void.self
+      )
+    )
+  }
+
+  func revert(on database: any Database) async throws {}
+}
+
+private struct EventMigration: AsyncMigration {
+  let name: String
+
+  func prepare(on database: any Database) async throws {
+    try await self.record("prepare:\(self.name)", on: database)
+  }
+
+  func revert(on database: any Database) async throws {
+    try await self.record("revert:\(self.name)", on: database)
+  }
+
+  private func record(_ value: String, on database: any Database) async throws {
+    try await database.execute(
+      #sql(
+        """
+        CREATE TABLE IF NOT EXISTS "vsq_migration_events" (
+          "id" BIGSERIAL PRIMARY KEY,
+          "value" TEXT NOT NULL
+        )
+        """,
+        as: Void.self
+      )
+    )
+    try await database.execute(
+      #sql(
+        "INSERT INTO \"vsq_migration_events\" (\"value\") VALUES (\(bind: value))",
+        as: Void.self
+      )
+    )
+  }
+}
+
+private struct SlowMigration: AsyncMigration {
+  let name: String
+
+  func prepare(on database: any Database) async throws {
+    try await database.execute(#sql("SELECT pg_sleep(0.5)", as: Void.self))
+    try await database.execute(
+      #sql("CREATE TABLE \"vsq_migration_fixture\" (\"id\" BIGINT PRIMARY KEY)", as: Void.self)
+    )
+  }
+
+  func revert(on database: any Database) async throws {}
+}
+
+private struct ConcurrentIndexMigration: AsyncMigration {
+  let name = "concurrent-index"
+
+  func prepare(on database: any Database) async throws {
+    try await database.execute(
+      #sql("CREATE TABLE \"vsq_migration_fixture\" (\"id\" BIGINT PRIMARY KEY)", as: Void.self)
+    )
+    try await database.execute(
+      #sql(
+        """
+        CREATE INDEX CONCURRENTLY "vsq_migration_fixture_id"
+        ON "vsq_migration_fixture" ("id")
+        """,
+        as: Void.self
+      )
+    )
+  }
+
+  func revert(on database: any Database) async throws {}
+}
 
 private final class NonSendablePostgresIntRepresentation: QueryRepresentable {
   var queryOutput: Int
@@ -349,6 +660,51 @@ private func resetRuntimeTable(on database: any Database) async throws {
     as: Void.self
   )
   .execute(on: database)
+}
+
+private func resetMigrationFixtures(on database: any Database) async throws {
+  try await database.execute(
+    #sql("DROP TABLE IF EXISTS \"_database_migrations\" CASCADE", as: Void.self)
+  )
+  try await database.execute(
+    #sql("DROP TABLE IF EXISTS \"vsq_migration_fixture\" CASCADE", as: Void.self)
+  )
+  try await database.execute(
+    #sql("DROP TABLE IF EXISTS \"vsq_migration_events\" CASCADE", as: Void.self)
+  )
+  try await database.execute(
+    #sql("DROP TABLE IF EXISTS \"vsq_migration_guard\" CASCADE", as: Void.self)
+  )
+}
+
+private func relationExists(_ name: String, on database: any Database) async throws -> Bool {
+  try await #sql("SELECT to_regclass(\(bind: name)) IS NOT NULL", as: Bool.self)
+    .first(on: database) ?? false
+}
+
+private func columnExists(_ name: String, on database: any Database) async throws -> Bool {
+  try await #sql(
+    """
+    SELECT EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_name = '_database_migrations'
+        AND column_name = \(bind: name)
+    )
+    """,
+    as: Bool.self
+  )
+  .first(on: database) ?? false
+}
+
+private func migrationRecordCount(on database: any Database) async throws -> Int {
+  try await #sql("SELECT COUNT(*) FROM \"_database_migrations\"", as: Int.self)
+    .first(on: database) ?? 0
+}
+
+private func migrationEventCount(on database: any Database) async throws -> Int {
+  try await #sql("SELECT COUNT(*) FROM \"vsq_migration_events\"", as: Int.self)
+    .first(on: database) ?? 0
 }
 
 private func rowCount(on database: any Database) async throws -> Int {

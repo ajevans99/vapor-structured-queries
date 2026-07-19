@@ -203,8 +203,11 @@ Calling `withTransaction` on a leased handle starts the transaction there.
 Nested transactions throw `DatabaseRuntimeError.nestedTransactionUnsupported`;
 savepoints are not implied.
 
-SQLite and `FakeDatabase` explicitly report connection and transaction APIs as
-unsupported rather than silently executing non-atomically.
+SQLite still reports general connection and transaction APIs as unsupported.
+Its migration runtime is a narrower capability that uses one connection and an
+atomic `BEGIN IMMEDIATE` transaction. `FakeDatabase` and third-party drivers
+fail with `unsupportedOperation(.migrationLock)` unless they explicitly
+implement the production migration contract.
 
 ## Readiness and lifecycle
 
@@ -244,13 +247,63 @@ Register `AsyncMigration` values on `app.migrations`, then run:
 ```bash
 swift run <YourApp> migrate
 swift run <YourApp> migrate --revert
+swift run <YourApp> migrate --revert-all
 ```
 
-The runtime transaction and leased-connection hooks are intended for migration
-hardening: migration bodies and bookkeeping can share `withTransaction`, while a
-Postgres advisory lock can use `withConnection`. This release does not yet
-change migration ordering, bookkeeping, revert semantics, or advisory-lock
-policy.
+`migrate` applies pending migrations in registration order. `--revert` reverts
+only the latest applied batch; the destructive `--revert-all` option must be
+selected explicitly. Application code has the same split:
+
+```swift
+try await app.autoMigrate()
+try await app.autoRevert()                 // Latest batch only
+try await app.revertAllMigrationBatches()  // Every batch
+```
+
+Postgres executes each per-database command in one transaction and holds
+`pg_advisory_xact_lock(1448300877, 1296648018)` across tracking-table setup,
+history validation, every migration body, and bookkeeping. The stable keys
+represent the `VSQM` / `MIGR` namespace. Transaction-scoped locking guarantees
+release on commit, rollback, cancellation, connection loss, and process crash.
+Concurrent replicas therefore serialize and re-read committed state before
+acting.
+
+Postgres migration bodies must be transaction-compatible. Non-transactional
+operations such as `CREATE INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY`
+are unsupported and fail without bookkeeping; use a normal index operation or
+manage such operations in a separately reviewed deployment step.
+
+SQLite holds an in-process operation gate and starts `BEGIN IMMEDIATE` on the
+same connection used by the migration-bound database handle. File-backed
+databases retry `SQLITE_BUSY`/`SQLITE_LOCKED` with cancellation checks, so
+independent connections and processes serialize without falling back to
+non-atomic execution. An in-memory database claims only same-instance,
+in-process safety because separate `:memory:` connections are separate
+databases.
+
+The tracking table persists `name`, `batch`, and a unique monotonic `sequence`.
+Postgres upgrades the column transactionally with `ALTER TABLE`; SQLite
+transactionally rebuilds, copies, verifies, drops, and renames the table so its
+`INTEGER NOT NULL UNIQUE` constraints are real and idempotent.
+Reverts use `sequence` in descending order, never alphabetical migration names.
+Legacy `name`/`batch` tables are upgraded under the same lock and transaction.
+Rows within a legacy batch are backfilled from current registration order,
+matching the old apply contract. This order is inferred, not validated, and a
+one-time warning is emitted during upgrade. Do not reorder already-applied
+migrations before the first hardened run: reordered known names are
+undetectable because the legacy schema did not persist their order.
+
+An applied migration absent from the running binary raises
+`MigrationError.unknownAppliedMigrations` before any transaction commits. The
+runtime never deletes unknown tracking rows. For renamed or removed migrations,
+retain the original `name`, temporarily re-register and revert it, or make a
+reviewed manual tracking-table rename alongside the code deployment.
+
+Third-party drivers must implement `migrationDialect` and
+`withMigrationLock`, including same-database cross-process serialization,
+single-connection affinity, and atomic commit/rollback. Otherwise they fail
+closed with `unsupportedOperation(.migrationLock)`. No process-local mutex is
+treated as multi-replica protection.
 
 Or use lifecycle flags:
 
@@ -258,6 +311,12 @@ Or use lifecycle flags:
 swift run <YourApp> --auto-migrate
 swift run <YourApp> --auto-revert
 ```
+
+Both flags are opt-in, and `--auto-revert` reverts only the latest batch. For
+production, prefer a deployment-controlled one-shot `migrate` job before
+rolling out application replicas. Although the advisory lock makes replica-side
+`--auto-migrate` safe, waiting for another runner can delay boot. Avoid
+automatic reverts as a production rollback strategy.
 
 Example migration:
 

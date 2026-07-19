@@ -6,6 +6,7 @@ import VaporStructuredQueries
 
 final class PostgresDatabase: Database {
   let logger: Logger
+  let migrationDialect = DatabaseMigrationDialect.postgres
 
   private let client: PostgresClient
   private let lifecycle = PostgresDatabaseLifecycle()
@@ -82,15 +83,20 @@ final class PostgresDatabase: Database {
     defer { lease.release() }
     return try await self.client.withConnection(isolation: isolation) { connection in
       let validity = PostgresConnectionHandleValidity()
-      defer { validity.invalidate() }
-      return try await operation(
-        PostgresConnectionDatabase(
-          connection: connection,
-          logger: context.logger,
-          state: .leased,
-          validity: validity
-        )
+      let database = PostgresConnectionDatabase(
+        connection: connection,
+        logger: context.logger,
+        state: .leased,
+        validity: validity
       )
+      do {
+        let result = try await operation(database)
+        await validity.invalidateAndWait()
+        return result
+      } catch {
+        await validity.invalidateAndWait()
+        throw error
+      }
     }
   }
 
@@ -103,27 +109,69 @@ final class PostgresDatabase: Database {
     defer { lease.release() }
     context.logger.debug("Beginning database transaction")
     do {
-      let result = try await self.client.withTransaction(
-        logger: context.logger,
-        file: context.file,
-        line: context.line,
-        isolation: isolation
-      ) { connection in
-        let validity = PostgresConnectionHandleValidity()
-        defer { validity.invalidate() }
-        return try await operation(
-          PostgresConnectionDatabase(
-            connection: connection,
+      let result = try await self.client.withConnection(isolation: isolation) { connection in
+        do {
+          return try await connection.withTransaction(
             logger: context.logger,
-            state: .transaction,
-            validity: validity
-          )
-        )
+            file: context.file,
+            line: context.line,
+            isolation: isolation
+          ) { connection in
+            let validity = PostgresConnectionHandleValidity()
+            let database = PostgresConnectionDatabase(
+              connection: connection,
+              logger: context.logger,
+              state: .transaction,
+              validity: validity
+            )
+            do {
+              let result = try await operation(database)
+              await validity.invalidateAndWait()
+              return result
+            } catch {
+              await validity.invalidateAndWait()
+              throw error
+            }
+          }
+        } catch let error as PostgresTransactionError {
+          if error.rollbackError != nil {
+            try? await connection.close()
+          }
+          throw error
+        }
       }
+
       context.logger.debug("Committed database transaction")
       return result
     } catch {
       context.logger.debug("Database transaction did not commit")
+      throw error
+    }
+  }
+
+  func withMigrationLock<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    do {
+      return try await self.withTransaction(context: context, isolation: isolation) { transaction in
+        try await transaction.execute(
+          #sql("SELECT pg_advisory_xact_lock(1448300877, 1296648018)", as: Void.self),
+          logger: context.logger,
+          file: context.file,
+          line: context.line
+        )
+        return try await operation(transaction)
+      }
+    } catch let error as PostgresTransactionError {
+      if error.beginError == nil,
+        error.rollbackError == nil,
+        error.commitError == nil,
+        let closureError = error.closureError
+      {
+        throw closureError
+      }
       throw error
     }
   }
@@ -176,6 +224,7 @@ private final class PostgresConnectionDatabase: Database {
   }
 
   let logger: Logger
+  let migrationDialect = DatabaseMigrationDialect.postgres
 
   private let connection: PostgresConnection
   private let state: State
@@ -201,19 +250,25 @@ private final class PostgresConnectionDatabase: Database {
     S.QueryValue: QueryRepresentable,
     S.QueryValue.QueryOutput: Sendable
   {
-    try self.validity.check()
-    let stream = DatabaseRowStream(
-      try await self.connection.query(
-        PostgresSendableStatement<S.QueryValue>(query: statement.query),
-        logger: context.logger,
-        file: context.file,
-        line: context.line
+    let lease = try self.validity.beginOperation()
+    do {
+      let stream = DatabaseRowStream(
+        try await self.connection.query(
+          PostgresSendableStatement<S.QueryValue>(query: statement.query),
+          logger: context.logger,
+          file: context.file,
+          line: context.line
+        )
       )
-    )
-    self.validity.register {
-      stream.cancel()
+      lease.release()
+      self.validity.register {
+        stream.cancel()
+      }
+      return stream
+    } catch {
+      lease.release()
+      throw error
     }
-    return stream
   }
 
   func execute<S: Statement>(
@@ -221,7 +276,8 @@ private final class PostgresConnectionDatabase: Database {
     context: DatabaseExecutionContext
   ) async throws -> DatabaseCommandMetadata?
   where S.QueryValue == () {
-    try self.validity.check()
+    let lease = try self.validity.beginOperation()
+    defer { lease.release() }
     return try await self.connection.execute(
       statement,
       logger: context.logger,
@@ -236,7 +292,8 @@ private final class PostgresConnectionDatabase: Database {
     isolation: isolated (any Actor)?,
     _ operation: (any Database) async throws -> sending Result
   ) async throws -> sending Result {
-    try self.validity.check()
+    let lease = try self.validity.beginOperation()
+    defer { lease.release() }
     return try await operation(self)
   }
 
@@ -245,10 +302,12 @@ private final class PostgresConnectionDatabase: Database {
     isolation: isolated (any Actor)?,
     _ operation: (any Database) async throws -> sending Result
   ) async throws -> sending Result {
-    try self.validity.check()
+    let outerLease = try self.validity.beginOperation()
+    defer { outerLease.release() }
     guard case .leased = self.state else {
       throw DatabaseRuntimeError.nestedTransactionUnsupported
     }
+
     context.logger.debug("Beginning database transaction")
     do {
       let result = try await self.connection.withTransaction(
@@ -258,20 +317,63 @@ private final class PostgresConnectionDatabase: Database {
         isolation: isolation
       ) { connection in
         let validity = PostgresConnectionHandleValidity()
-        defer { validity.invalidate() }
-        return try await operation(
-          PostgresConnectionDatabase(
-            connection: connection,
-            logger: context.logger,
-            state: .transaction,
-            validity: validity
-          )
+        let database = PostgresConnectionDatabase(
+          connection: connection,
+          logger: context.logger,
+          state: .transaction,
+          validity: validity
         )
+        do {
+          let result = try await operation(database)
+          await validity.invalidateAndWait()
+          return result
+        } catch {
+          await validity.invalidateAndWait()
+          throw error
+        }
       }
       context.logger.debug("Committed database transaction")
       return result
+    } catch let error as PostgresTransactionError {
+      if error.rollbackError != nil {
+        try? await self.connection.close()
+      }
+      context.logger.debug("Database transaction did not commit")
+      throw error
     } catch {
       context.logger.debug("Database transaction did not commit")
+      throw error
+    }
+  }
+
+  func withMigrationLock<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    let lease = try self.validity.beginOperation()
+    defer { lease.release() }
+    guard case .leased = self.state else {
+      throw DatabaseRuntimeError.nestedTransactionUnsupported
+    }
+    do {
+      return try await self.withTransaction(context: context, isolation: isolation) { transaction in
+        try await transaction.execute(
+          #sql("SELECT pg_advisory_xact_lock(1448300877, 1296648018)", as: Void.self),
+          logger: context.logger,
+          file: context.file,
+          line: context.line
+        )
+        return try await operation(transaction)
+      }
+    } catch let error as PostgresTransactionError {
+      if error.beginError == nil,
+        error.rollbackError == nil,
+        error.commitError == nil,
+        let closureError = error.closureError
+      {
+        throw closureError
+      }
       throw error
     }
   }
@@ -280,7 +382,8 @@ private final class PostgresConnectionDatabase: Database {
     context: DatabaseExecutionContext,
     timeout: Duration
   ) async throws {
-    try self.validity.check()
+    let lease = try self.validity.beginOperation()
+    defer { lease.release() }
     try await withReadinessTimeout(timeout) {
       _ = try await self.connection.execute(
         #sql("SELECT 1", as: Void.self),
@@ -300,7 +403,9 @@ private final class PostgresConnectionDatabase: Database {
 private final class PostgresConnectionHandleValidity: Sendable {
   private struct State: Sendable {
     var isValid = true
+    var activeOperations = 0
     var invalidationHandlers: [@Sendable () -> Void] = []
+    var drainContinuations: [CheckedContinuation<Void, Never>] = []
   }
 
   private let state = NIOLockedValueBox(State())
@@ -308,6 +413,18 @@ private final class PostgresConnectionHandleValidity: Sendable {
   func check() throws {
     guard self.state.withLockedValue({ $0.isValid }) else {
       throw DatabaseRuntimeError.borrowedConnectionExpired
+    }
+  }
+
+  func beginOperation() throws -> PostgresConnectionOperationLease {
+    try self.state.withLockedValue { state in
+      guard state.isValid else {
+        throw DatabaseRuntimeError.borrowedConnectionExpired
+      }
+      state.activeOperations += 1
+      return PostgresConnectionOperationLease { [weak self] in
+        self?.finishOperation()
+      }
     }
   }
 
@@ -324,7 +441,7 @@ private final class PostgresConnectionHandleValidity: Sendable {
     }
   }
 
-  func invalidate() {
+  func invalidateAndWait() async {
     let handlers = self.state.withLockedValue { state -> [@Sendable () -> Void] in
       guard state.isValid else {
         return []
@@ -335,6 +452,49 @@ private final class PostgresConnectionHandleValidity: Sendable {
     for handler in handlers {
       handler()
     }
+    await withCheckedContinuation { continuation in
+      let resumeImmediately = self.state.withLockedValue { state in
+        if state.activeOperations == 0 {
+          return true
+        }
+        state.drainContinuations.append(continuation)
+        return false
+      }
+      if resumeImmediately {
+        continuation.resume()
+      }
+    }
+  }
+
+  private func finishOperation() {
+    let continuations = self.state.withLockedValue {
+      state -> [CheckedContinuation<Void, Never>] in
+      precondition(state.activeOperations > 0)
+      state.activeOperations -= 1
+      guard !state.isValid, state.activeOperations == 0 else {
+        return []
+      }
+      return state.drainContinuations.takeAll()
+    }
+    for continuation in continuations {
+      continuation.resume()
+    }
+  }
+}
+
+private final class PostgresConnectionOperationLease: Sendable {
+  private let releaseOperation: NIOLockedValueBox<(@Sendable () -> Void)?>
+
+  init(release: @escaping @Sendable () -> Void) {
+    self.releaseOperation = NIOLockedValueBox(release)
+  }
+
+  func release() {
+    self.releaseOperation.withLockedValue { $0.take()?() }
+  }
+
+  deinit {
+    self.release()
   }
 }
 

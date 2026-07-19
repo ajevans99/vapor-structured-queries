@@ -6,8 +6,10 @@ import VaporStructuredQueries
 
 final class SQLiteDatabase: VaporStructuredQueries.Database, @unchecked Sendable {
   let logger: Logger
+  let migrationDialect = DatabaseMigrationDialect.sqlite
 
   private let lock = NSLock()
+  private let operationGate = SQLiteOperationGate()
   private var driver: SQLiteDriver?
   private let initializationError: Error?
 
@@ -30,8 +32,10 @@ final class SQLiteDatabase: VaporStructuredQueries.Database, @unchecked Sendable
     S.QueryValue: QueryRepresentable,
     S.QueryValue.QueryOutput: Sendable
   {
-    let rows = try self.withDriver { driver in
-      try driver.execute(statement)
+    let rows = try await self.withOperationGate {
+      try self.withDriver { driver in
+        try driver.execute(statement)
+      }
     }
     return DatabaseRowStream(SQLiteRows(rows))
   }
@@ -41,8 +45,10 @@ final class SQLiteDatabase: VaporStructuredQueries.Database, @unchecked Sendable
     context: DatabaseExecutionContext
   ) async throws -> DatabaseCommandMetadata?
   where S.QueryValue == () {
-    try self.withDriver { driver in
-      try driver.execute(statement)
+    try await self.withOperationGate {
+      try self.withDriver { driver in
+        try driver.execute(statement)
+      }
     }
     return nil
   }
@@ -63,20 +69,68 @@ final class SQLiteDatabase: VaporStructuredQueries.Database, @unchecked Sendable
     throw DatabaseRuntimeError.unsupportedOperation(.transaction)
   }
 
+  func withMigrationLock<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    let lease = try await self.operationGate.acquire()
+    do {
+      try await self.beginImmediate()
+    } catch {
+      await self.operationGate.release(lease)
+      throw error
+    }
+
+    let validity = SQLiteMigrationHandleValidity()
+    do {
+      let result = try await operation(
+        SQLiteMigrationDatabase(
+          database: self,
+          logger: context.logger,
+          validity: validity
+        )
+      )
+      try Task.checkCancellation()
+      await validity.invalidateAndWait()
+      try self.executeDirect("COMMIT")
+      await self.operationGate.release(lease)
+      return result
+    } catch {
+      await validity.invalidateAndWait()
+      do {
+        try self.executeDirect("ROLLBACK")
+      } catch let rollbackError {
+        self.invalidateDriver()
+        await self.operationGate.release(lease)
+        throw SQLiteMigrationRollbackError(
+          operationError: String(reflecting: error),
+          rollbackError: String(reflecting: rollbackError)
+        )
+      }
+      await self.operationGate.release(lease)
+      throw error
+    }
+  }
+
   func checkReadiness(
     context: DatabaseExecutionContext,
     timeout: Duration
   ) async throws {
-    try Task.checkCancellation()
-    _ = try self.withDriver { driver in
-      try driver.execute(#sql("SELECT 1", as: Int.self))
+    try await self.withOperationGate {
+      try Task.checkCancellation()
+      _ = try self.withDriver { driver in
+        try driver.execute(#sql("SELECT 1", as: Int.self))
+      }
+      try Task.checkCancellation()
     }
-    try Task.checkCancellation()
   }
 
   func shutdown() async throws {
-    self.lock.withLock {
-      self.driver = nil
+    try await self.withOperationGate {
+      self.lock.withLock {
+        self.driver = nil
+      }
     }
   }
 
@@ -112,10 +166,286 @@ final class SQLiteDatabase: VaporStructuredQueries.Database, @unchecked Sendable
     }
     return try operation(driver)
   }
+
+  fileprivate func streamDirect<S: Statement>(
+    _ statement: S
+  ) throws -> DatabaseRowStream<S.QueryValue.QueryOutput>
+  where
+    S.QueryValue: QueryRepresentable,
+    S.QueryValue.QueryOutput: Sendable
+  {
+    let rows = try self.withDriver { try $0.execute(statement) }
+    return DatabaseRowStream(SQLiteRows(rows))
+  }
+
+  fileprivate func executeDirect<S: Statement>(_ statement: S) throws
+  where S.QueryValue == () {
+    try self.withDriver { try $0.execute(statement) }
+  }
+
+  private func executeDirect(_ sql: String) throws {
+    try self.withDriver { try $0.execute(sql) }
+  }
+
+  private func invalidateDriver() {
+    self.lock.withLock {
+      self.driver = nil
+    }
+  }
+
+  private func beginImmediate() async throws {
+    while true {
+      try Task.checkCancellation()
+      do {
+        try self.executeDirect("BEGIN IMMEDIATE")
+        return
+      } catch let error as SQLiteError where error.isBusy {
+        try await Task.sleep(for: .milliseconds(20))
+      }
+    }
+  }
+
+  private func withOperationGate<Result: Sendable>(
+    _ operation: () throws -> Result
+  ) async throws -> Result {
+    let lease = try await self.operationGate.acquire()
+    do {
+      try Task.checkCancellation()
+      let result = try operation()
+      await self.operationGate.release(lease)
+      return result
+    } catch {
+      await self.operationGate.release(lease)
+      throw error
+    }
+  }
 }
 
 private enum SQLiteDatabaseError: Error {
   case connectionClosed
+}
+
+private struct SQLiteMigrationRollbackError: Error, Equatable, Sendable {
+  let operationError: String
+  let rollbackError: String
+}
+
+private actor SQLiteOperationGate {
+  struct Lease: Equatable, Sendable {
+    let id: UUID
+  }
+
+  private struct Waiter {
+    let lease: Lease
+    let continuation: CheckedContinuation<Void, any Error>
+  }
+
+  private var owner: Lease?
+  private var waiters: [Waiter] = []
+
+  func acquire() async throws -> Lease {
+    let lease = Lease(id: UUID())
+    try Task.checkCancellation()
+    try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        if self.owner == nil {
+          self.owner = lease
+          continuation.resume()
+        } else {
+          self.waiters.append(Waiter(lease: lease, continuation: continuation))
+        }
+      }
+      if Task.isCancelled {
+        self.release(lease)
+        throw CancellationError()
+      }
+    } onCancel: {
+      Task { await self.cancel(lease) }
+    }
+    return lease
+  }
+
+  func release(_ lease: Lease) {
+    guard self.owner == lease else { return }
+    if self.waiters.isEmpty {
+      self.owner = nil
+    } else {
+      let waiter = self.waiters.removeFirst()
+      self.owner = waiter.lease
+      waiter.continuation.resume()
+    }
+  }
+
+  private func cancel(_ lease: Lease) {
+    guard self.owner != lease else { return }
+    guard let index = self.waiters.firstIndex(where: { $0.lease == lease }) else {
+      return
+    }
+    let waiter = self.waiters.remove(at: index)
+    waiter.continuation.resume(throwing: CancellationError())
+  }
+}
+
+private final class SQLiteMigrationHandleValidity: @unchecked Sendable {
+  private struct State {
+    var isValid = true
+    var activeOperations = 0
+    var drainContinuations: [CheckedContinuation<Void, Never>] = []
+  }
+
+  private let lock = NSLock()
+  private var state = State()
+
+  func beginOperation() throws -> SQLiteMigrationOperationLease {
+    try self.lock.withLock {
+      guard self.state.isValid else {
+        throw DatabaseRuntimeError.borrowedConnectionExpired
+      }
+      self.state.activeOperations += 1
+      return SQLiteMigrationOperationLease { [weak self] in
+        self?.finishOperation()
+      }
+    }
+  }
+
+  func invalidateAndWait() async {
+    self.lock.withLock {
+      self.state.isValid = false
+    }
+    await withCheckedContinuation { continuation in
+      let resumeImmediately = self.lock.withLock {
+        if self.state.activeOperations == 0 {
+          return true
+        }
+        self.state.drainContinuations.append(continuation)
+        return false
+      }
+      if resumeImmediately {
+        continuation.resume()
+      }
+    }
+  }
+
+  private func finishOperation() {
+    let continuations = self.lock.withLock {
+      () -> [CheckedContinuation<Void, Never>] in
+      precondition(self.state.activeOperations > 0)
+      self.state.activeOperations -= 1
+      guard !self.state.isValid, self.state.activeOperations == 0 else {
+        return []
+      }
+      let continuations = self.state.drainContinuations
+      self.state.drainContinuations = []
+      return continuations
+    }
+    for continuation in continuations {
+      continuation.resume()
+    }
+  }
+}
+
+private final class SQLiteMigrationOperationLease: @unchecked Sendable {
+  private let lock = NSLock()
+  private var releaseOperation: (@Sendable () -> Void)?
+
+  init(release: @escaping @Sendable () -> Void) {
+    self.releaseOperation = release
+  }
+
+  func release() {
+    let operation = self.lock.withLock {
+      let operation = self.releaseOperation
+      self.releaseOperation = nil
+      return operation
+    }
+    operation?()
+  }
+
+  deinit {
+    self.release()
+  }
+}
+
+private final class SQLiteMigrationDatabase: VaporStructuredQueries.Database {
+  let migrationDialect = DatabaseMigrationDialect.sqlite
+  let logger: Logger
+
+  private let database: SQLiteDatabase
+  private let validity: SQLiteMigrationHandleValidity
+
+  init(
+    database: SQLiteDatabase,
+    logger: Logger,
+    validity: SQLiteMigrationHandleValidity
+  ) {
+    self.database = database
+    self.logger = logger
+    self.validity = validity
+  }
+
+  func stream<S: Statement>(
+    _ statement: S,
+    context: DatabaseExecutionContext
+  ) async throws -> DatabaseRowStream<S.QueryValue.QueryOutput>
+  where
+    S.QueryValue: QueryRepresentable,
+    S.QueryValue.QueryOutput: Sendable
+  {
+    let lease = try self.validity.beginOperation()
+    defer { lease.release() }
+    return try self.database.streamDirect(statement)
+  }
+
+  func execute<S: Statement>(
+    _ statement: S,
+    context: DatabaseExecutionContext
+  ) async throws -> DatabaseCommandMetadata?
+  where S.QueryValue == () {
+    let lease = try self.validity.beginOperation()
+    defer { lease.release() }
+    try self.database.executeDirect(statement)
+    return nil
+  }
+
+  func withConnection<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    let lease = try self.validity.beginOperation()
+    defer { lease.release() }
+    return try await operation(self)
+  }
+
+  func withTransaction<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    throw DatabaseRuntimeError.nestedTransactionUnsupported
+  }
+
+  func withMigrationLock<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    throw DatabaseRuntimeError.nestedTransactionUnsupported
+  }
+
+  func checkReadiness(
+    context: DatabaseExecutionContext,
+    timeout: Duration
+  ) async throws {
+    let lease = try self.validity.beginOperation()
+    defer { lease.release() }
+    try Task.checkCancellation()
+    _ = try self.database.streamDirect(#sql("SELECT 1", as: Int.self))
+  }
+
+  func shutdown() async throws {
+    throw DatabaseRuntimeError.unsupportedOperation(.shutdown)
+  }
 }
 
 private struct SQLiteDriver {
@@ -333,14 +663,22 @@ private struct Int64OverflowError: Error {
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 private struct SQLiteError: LocalizedError {
+  let code: Int32
   let message: String
 
   init(db handle: OpaquePointer?) {
+    self.code = sqlite3_extended_errcode(handle)
     self.message = String(cString: sqlite3_errmsg(handle))
   }
 
   init(code: Int32) {
+    self.code = code
     self.message = String(cString: sqlite3_errstr(code))
+  }
+
+  var isBusy: Bool {
+    self.code == SQLITE_BUSY || self.code == SQLITE_LOCKED
+      || self.code & 0xFF == SQLITE_BUSY || self.code & 0xFF == SQLITE_LOCKED
   }
 
   var errorDescription: String? {

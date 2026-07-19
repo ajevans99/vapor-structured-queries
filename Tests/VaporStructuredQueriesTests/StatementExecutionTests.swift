@@ -125,6 +125,9 @@ struct StatementExecutionTests {
     await #expect(throws: DatabaseRuntimeError.unsupportedOperation(.transaction)) {
       try await database.withTransaction { _ in () }
     }
+    await #expect(throws: DatabaseRuntimeError.unsupportedOperation(.migrationLock)) {
+      try await database.withMigrationLock { _ in () }
+    }
   }
 
   @Test("fake readiness and shutdown are deterministic")

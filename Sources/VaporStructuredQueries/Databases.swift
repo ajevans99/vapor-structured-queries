@@ -69,6 +69,7 @@ public final class Databases: @unchecked Sendable {
       guard !storage.isShutdown else {
         return nil
       }
+
       let resolvedID = id ?? storage.defaultID
       guard let resolvedID else {
         return nil
@@ -86,6 +87,10 @@ public final class Databases: @unchecked Sendable {
       storage.instances[resolvedID] = created
       return DatabaseHandle(database: created, logger: logger)
     }
+  }
+
+  func defaultDatabaseID() -> DatabaseID? {
+    self.storage.withLockedValue(\.defaultID)
   }
 
   /// Shuts down all resolved databases.

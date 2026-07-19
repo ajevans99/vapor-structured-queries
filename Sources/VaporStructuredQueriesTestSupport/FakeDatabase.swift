@@ -35,16 +35,26 @@ public final class FakeDatabase: Database {
     var shutdownError: (any Error)?
     var shutdownCallCount = 0
     var isShutdown = false
+    var migrationCommitCount = 0
+    var migrationRollbackCount = 0
   }
 
   private let storage = NIOLockedValueBox(Storage())
 
   /// The default logger for fake operations.
   public let logger: Logger
+  public let migrationDialect: DatabaseMigrationDialect
+  private let supportsMigrationLock: Bool
 
   /// Creates an empty fake database.
-  public init(logger: Logger = Logger(label: "VaporStructuredQueriesTestSupport.FakeDatabase")) {
+  public init(
+    logger: Logger = Logger(label: "VaporStructuredQueriesTestSupport.FakeDatabase"),
+    supportsMigrationLock: Bool = false,
+    migrationDialect: DatabaseMigrationDialect = .postgres
+  ) {
     self.logger = logger
+    self.supportsMigrationLock = supportsMigrationLock
+    self.migrationDialect = supportsMigrationLock ? migrationDialect : .unsupported
   }
 
   /// Enqueues rows returned by a read for a prepared SQL string.
@@ -88,6 +98,13 @@ public final class FakeDatabase: Database {
   /// Returns the number of shutdown calls.
   public func shutdownCallCount() -> Int {
     self.storage.withLockedValue(\.shutdownCallCount)
+  }
+
+  /// Returns committed and rolled-back modeled migration operation counts.
+  public func migrationOperationCounts() -> (committed: Int, rolledBack: Int) {
+    self.storage.withLockedValue {
+      ($0.migrationCommitCount, $0.migrationRollbackCount)
+    }
   }
 
   /// Returns statements that have been executed.
@@ -161,6 +178,24 @@ public final class FakeDatabase: Database {
     _ operation: (any Database) async throws -> sending Result
   ) async throws -> sending Result {
     throw DatabaseRuntimeError.unsupportedOperation(.transaction)
+  }
+
+  public func withMigrationLock<Result: Sendable>(
+    context: DatabaseExecutionContext,
+    isolation: isolated (any Actor)?,
+    _ operation: (any Database) async throws -> sending Result
+  ) async throws -> sending Result {
+    guard self.supportsMigrationLock else {
+      throw DatabaseRuntimeError.unsupportedOperation(.migrationLock)
+    }
+    do {
+      let result = try await operation(self)
+      self.storage.withLockedValue { $0.migrationCommitCount += 1 }
+      return result
+    } catch {
+      self.storage.withLockedValue { $0.migrationRollbackCount += 1 }
+      throw error
+    }
   }
 
   public func checkReadiness(
