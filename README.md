@@ -21,6 +21,14 @@ If you know [FluentKit](https://github.com/vapor/fluent-kit), the API style here
 - `VaporStructuredQueriesSQLite`: SQLite driver implementation using StructuredQueries' SQLite driver.
 - `VaporStructuredQueriesTestSupport`: fake database utilities for unit tests.
 
+## Compatibility
+
+Requires Swift 6.1 or newer and macOS 13 or newer. StructuredQueries is pinned to
+[`ajevans99/swift-structured-queries` at `387e0da4`](https://github.com/ajevans99/swift-structured-queries/commit/387e0da4b23af9bf6513fb6108e7084457bfacfc),
+which incorporates upstream `a834ac78` while retaining the `StructuredQueriesPostgresNIO` product.
+The upstream-only package does not provide this bridge. Swift 6.4 uses the dependency's main
+manifest; Swift 6.1-6.3 uses its compatibility manifest.
+
 ## Quick start
 
 ```swift
@@ -99,6 +107,16 @@ try await Todo.insert {
 .execute(on: req.db)
 ```
 
+Use explicit bindings when assigning runtime values in an update:
+
+```swift
+let newTitle = "Wash the car tomorrow"
+try await Todo.where { !$0.isComplete }.update {
+  $0.title = #bind(newTitle)
+}
+.execute(on: req.db)
+```
+
 You can still mix in raw SQL safely with `#sql` when needed.
 
 ## Draft features
@@ -164,6 +182,23 @@ struct CreateTodos: AsyncMigration {
 - `make lint`
 - `swift build`
 - `swift test`
+
+Postgres integration tests are explicitly skipped unless enabled. Run them against a **dedicated,
+disposable database** (not an application database, and not shared by concurrent test runs):
+
+```bash
+RUN_POSTGRES_INTEGRATION_TESTS=1 \
+POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 \
+POSTGRES_USER=postgres POSTGRES_DB=vsq_test \
+swift test
+```
+
+Set `POSTGRES_PASSWORD` through the environment when authentication requires it. Once enabled, missing
+connection settings, invalid ports, and connection failures fail the tests rather than silently
+skipping them. Tests cover raw SQL and typed insert/select/update/delete statements, `RETURNING`,
+nullable values, native Boolean/UUID/Date/blob round trips, and query/decoding errors on both backends. Test tables
+are dropped after the flow, including on failure. Postgres uses regular tables because consecutive
+operations on the pooled client do not guarantee the same connection.
 
 ## License
 

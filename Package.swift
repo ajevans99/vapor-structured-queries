@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.1
 import PackageDescription
 
 let package = Package(
@@ -28,9 +28,10 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/vapor/vapor.git", from: "4.115.0"),
     .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
-    // .package(name: "swift-structured-queries", path: "../swift-structured-queries"),
-    // .package(url: "https://github.com/pointfreeco/swift-structured-queries.git", from: "0.30.0"),
-    .package(url: "https://github.com/ajevans99/swift-structured-queries.git", branch: "postgres"),
+    .package(
+      url: "https://github.com/ajevans99/swift-structured-queries.git",
+      revision: "387e0da4b23af9bf6513fb6108e7084457bfacfc"
+    ),
   ],
   targets: [
     .target(

@@ -45,6 +45,8 @@ struct SQLiteIntegrationTests {
       )
       .first(on: app.db)
       #expect(count == 0)
+
+      try await verifyTypedQueryFlow(on: app.db)
     }
   }
 }

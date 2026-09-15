@@ -30,7 +30,8 @@ final class PostgresDatabase: Database {
   func all<S: Statement>(_ statement: S) async throws -> [S.QueryValue.QueryOutput]
   where S.QueryValue: QueryRepresentable, S.QueryValue.QueryOutput: Sendable {
     var results: [S.QueryValue.QueryOutput] = []
-    for try await row in try self.client.query(statement) {
+    let query = SQLQueryExpression(statement.query, as: DecodedValue<S.QueryValue>.self)
+    for try await row in try await self.client.query(query) {
       results.append(row)
     }
     return results
@@ -38,18 +39,32 @@ final class PostgresDatabase: Database {
 
   func first<S: Statement>(_ statement: S) async throws -> S.QueryValue.QueryOutput?
   where S.QueryValue: QueryRepresentable, S.QueryValue.QueryOutput: Sendable {
-    for try await row in try self.client.query(statement) {
+    let query = SQLQueryExpression(statement.query, as: DecodedValue<S.QueryValue>.self)
+    for try await row in try await self.client.query(query) {
       return row
     }
     return nil
   }
 
   func execute(_ statement: some Statement<()>) async throws {
-    for try await _ in try self.client.query(statement) {
-    }
+    _ = try await self.client.execute(statement)
   }
 
   func shutdown() {
     self.runTask.cancel()
+  }
+}
+
+// Only decoded output crosses the async sequence boundary, not the query representation.
+private struct DecodedValue<Value: QueryRepresentable>: QueryRepresentable, Sendable
+where Value.QueryOutput: Sendable {
+  let queryOutput: Value.QueryOutput
+
+  init(queryOutput: Value.QueryOutput) {
+    self.queryOutput = queryOutput
+  }
+
+  init(decoder: inout some QueryDecoder) throws {
+    self.queryOutput = try Value(decoder: &decoder).queryOutput
   }
 }

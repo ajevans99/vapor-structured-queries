@@ -1,5 +1,25 @@
 import StructuredQueries
 
+extension SelectStatement where QueryValue == (), Joins == (), From.QueryOutput: Sendable {
+  /// Executes an implicit whole-table selection and decodes all rows.
+  ///
+  /// - Parameter database: The destination database.
+  /// - Returns: Decoded table rows.
+  /// - Throws: An error if execution or decoding fails.
+  public func all(on database: any Database) async throws -> [From.QueryOutput] {
+    try await database.all(SQLQueryExpression(self.selectStar().query, as: From.self))
+  }
+
+  /// Executes an implicit whole-table selection and decodes the first row, if present.
+  ///
+  /// - Parameter database: The destination database.
+  /// - Returns: The first decoded table row, if any.
+  /// - Throws: An error if execution or decoding fails.
+  public func first(on database: any Database) async throws -> From.QueryOutput? {
+    try await database.first(SQLQueryExpression(self.selectStar().query, as: From.self))
+  }
+}
+
 extension Statement where QueryValue == () {
   /// Executes a non-returning statement on a database.
   ///
