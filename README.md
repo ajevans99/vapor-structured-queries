@@ -56,6 +56,31 @@ In handlers, execute statements on `req.db`:
 let rows = try await #sql("SELECT \(bind: 1)", as: Int.self).all(on: req.db)
 ```
 
+### Borrowing an existing Postgres connection
+
+When a connection is already leased (for example, by a transaction owner), use
+`connection.structuredQueries(logger:)` instead of configuring a second pool:
+
+```swift
+import StructuredQueries
+import StructuredQueriesPostgresNIO
+import VaporStructuredQueries
+import VaporStructuredQueriesPostgresNIO
+
+try await client.withConnection { connection in
+  let database = connection.structuredQueries(logger: logger)
+  let rows = try await #sql("SELECT \(bind: 1)", as: Int.self).all(on: database)
+}
+```
+
+Every operation uses that exact connection and sees its current transaction. For a Fluent-owned
+transaction, pass the connection belonging to that transaction, not a new lease from another pool.
+Keep the adapter and all operations inside the owner's connection/transaction scope; the adapter does
+not extend the lease and must not be cached in `app.databases`. The owner controls commit/rollback.
+`shutdown()` does nothing and never closes the borrowed connection during ordinary cleanup.
+Cancellation still uses the native bridge's behavior: cancelling a non-returning `execute` can close
+the connection, so the owner must handle transaction and connection cleanup on cancellation.
+
 SQLite example:
 
 ```swift
