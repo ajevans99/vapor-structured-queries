@@ -35,9 +35,9 @@ struct MigratorTests {
         as: "test"
       )
       app.database.default(to: "test")
-      app.migrations.add(CreateWidgetsMigration())
+      app.structuredQueriesMigrations.add(CreateWidgetsMigration())
 
-      try await app.autoMigrate()
+      try await app.structuredQueriesAutoMigrate()
     }
 
     let statements = database.recordedStatements().map(\.sql)
@@ -72,9 +72,9 @@ struct MigratorTests {
         as: "test"
       )
       app.database.default(to: "test")
-      app.migrations.add(CreateWidgetsMigration())
+      app.structuredQueriesMigrations.add(CreateWidgetsMigration())
 
-      try await app.autoRevert()
+      try await app.structuredQueriesAutoRevert()
     }
 
     let statements = database.recordedStatements().map(\.sql)
@@ -91,10 +91,10 @@ struct MigratorTests {
       app.database.use(.init { _, _ in defaultDatabase }, as: "default")
       app.database.use(.init { _, _ in analyticsDatabase }, as: "analytics")
       app.database.default(to: "default")
-      app.migrations.add(CreateWidgetsMigration(), to: "default")
-      app.migrations.add(CreateWidgetsMigration(), to: "analytics")
+      app.structuredQueriesMigrations.add(CreateWidgetsMigration(), to: "default")
+      app.structuredQueriesMigrations.add(CreateWidgetsMigration(), to: "analytics")
 
-      try await app.autoMigrate()
+      try await app.structuredQueriesAutoMigrate()
     }
 
     let defaultSQL = defaultDatabase.recordedStatements().map(\.sql)

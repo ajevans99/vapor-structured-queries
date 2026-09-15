@@ -30,6 +30,39 @@ The upstream-only package does not provide this bridge. Swift 6.4 uses the depen
 manifest; Swift 6.1-6.3 uses its compatibility manifest. Both use the
 `xctest-dynamic-overlay` dependency identity to remain compatible with existing package graphs.
 
+### Coexisting with Fluent
+
+Enable the opt-in `FluentCompatibility` SwiftPM trait when importing both integrations:
+
+```swift
+.package(
+  url: "https://github.com/ajevans99/vapor-structured-queries.git",
+  branch: "main",
+  traits: ["FluentCompatibility"]
+)
+```
+
+This removes only this package's conveniences that overlap Fluent: `Application.db`, `Request.db`
+(including identifier/logger overloads), and `Application.databases`, `migrations`, `migrator`,
+`autoMigrate()`, and `autoRevert()`. Existing standalone names remain available by default.
+The following unambiguous equivalents are available with or without the trait:
+
+| Standalone convenience | Always-available StructuredQueries name |
+| --- | --- |
+| `app.db` / `req.db` and `db(...)` | `app.structuredQueriesDB` / `req.structuredQueriesDB` and `structuredQueriesDB(...)` |
+| `app.databases` | `app.structuredQueriesDatabases` |
+| `app.migrations` | `app.structuredQueriesMigrations` |
+| `app.migrator` | `app.structuredQueriesMigrator` |
+| `app.autoMigrate()` | `app.structuredQueriesAutoMigrate()` |
+| `app.autoRevert()` | `app.structuredQueriesAutoRevert()` |
+
+The `app.database` configuration namespace and `connection.structuredQueries(logger:)` borrowed
+adapter are unchanged. The trait adds no Fluent dependency and does not share pools or transaction
+ownership: use the borrowed adapter on Fluent's existing transaction connection when affinity matters.
+Traits are package-wide, so enabling this trait affects every consumer of this package in the graph.
+When using a project generator, ensure it propagates the selected trait to the package's compilation
+conditions. To verify locally, run `swift test --traits FluentCompatibility`.
+
 ## Quick start
 
 ```swift

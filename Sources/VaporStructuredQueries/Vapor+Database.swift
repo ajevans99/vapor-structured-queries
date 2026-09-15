@@ -4,52 +4,101 @@ import StructuredQueries
 import Vapor
 
 extension Request {
-  /// The default database for this request.
-  public var db: any Database {
-    self.db(nil)
+  #if !FluentCompatibility
+    /// The default database for this request.
+    public var db: any Database {
+      self.db(nil)
+    }
+
+    /// Resolves a database for this request.
+    ///
+    /// - Parameter id: The optional database identifier.
+    /// - Returns: The resolved database.
+    public func db(_ id: DatabaseID?) -> any Database {
+      self.db(id, logger: self.logger)
+    }
+
+    /// Resolves a database for this request with a custom logger.
+    ///
+    /// - Parameters:
+    ///   - id: The optional database identifier.
+    ///   - logger: The logger used for resolution.
+    /// - Returns: The resolved database.
+    public func db(_ id: DatabaseID?, logger: Logger) -> any Database {
+      self.structuredQueriesDB(id, logger: logger)
+    }
+  #endif
+
+  /// The default StructuredQueries database for this request.
+  public var structuredQueriesDB: any Database {
+    self.structuredQueriesDB(nil)
   }
 
-  /// Resolves a database for this request.
-  ///
-  /// - Parameter id: The optional database identifier.
-  /// - Returns: The resolved database.
-  public func db(_ id: DatabaseID?) -> any Database {
-    self.db(id, logger: self.logger)
+  /// Resolves a StructuredQueries database by identifier using the request logger.
+  public func structuredQueriesDB(_ id: DatabaseID?) -> any Database {
+    self.structuredQueriesDB(id, logger: self.logger)
   }
 
-  /// Resolves a database for this request with a custom logger.
-  ///
-  /// - Parameters:
-  ///   - id: The optional database identifier.
-  ///   - logger: The logger used for resolution.
-  /// - Returns: The resolved database.
-  public func db(_ id: DatabaseID?, logger: Logger) -> any Database {
-    self.application.db(id, logger: logger)
+  /// Resolves a StructuredQueries database by identifier with a custom logger.
+  public func structuredQueriesDB(_ id: DatabaseID?, logger: Logger) -> any Database {
+    self.application.structuredQueriesDB(id, logger: logger)
   }
 }
 
 extension Application {
-  /// The default database for this application.
-  public var db: any Database {
-    self.db(nil)
+  #if !FluentCompatibility
+    /// The default database for this application.
+    public var db: any Database {
+      self.db(nil)
+    }
+
+    /// Resolves a database for this application.
+    ///
+    /// - Parameter id: The optional database identifier.
+    /// - Returns: The resolved database.
+    public func db(_ id: DatabaseID?) -> any Database {
+      self.db(id, logger: self.logger)
+    }
+
+    /// Resolves a database for this application with a custom logger.
+    ///
+    /// - Parameters:
+    ///   - id: The optional database identifier.
+    ///   - logger: The logger used for resolution.
+    /// - Returns: The resolved database.
+    public func db(_ id: DatabaseID?, logger: Logger) -> any Database {
+      self.structuredQueriesDB(id, logger: logger)
+    }
+
+    /// All configured database registries for this application.
+    public var databases: Databases { self.structuredQueriesDatabases }
+
+    /// The migration registry for this application.
+    public var migrations: Migrations { self.structuredQueriesMigrations }
+
+    /// The migrator for this application.
+    public var migrator: Migrator { self.structuredQueriesMigrator }
+
+    /// Runs all pending migrations.
+    public func autoMigrate() async throws { try await self.structuredQueriesAutoMigrate() }
+
+    /// Reverts all prepared migrations.
+    public func autoRevert() async throws { try await self.structuredQueriesAutoRevert() }
+  #endif
+
+  /// The default StructuredQueries database for this application.
+  public var structuredQueriesDB: any Database {
+    self.structuredQueriesDB(nil)
   }
 
-  /// Resolves a database for this application.
-  ///
-  /// - Parameter id: The optional database identifier.
-  /// - Returns: The resolved database.
-  public func db(_ id: DatabaseID?) -> any Database {
-    self.db(id, logger: self.logger)
+  /// Resolves a StructuredQueries database by identifier using the application logger.
+  public func structuredQueriesDB(_ id: DatabaseID?) -> any Database {
+    self.structuredQueriesDB(id, logger: self.logger)
   }
 
-  /// Resolves a database for this application with a custom logger.
-  ///
-  /// - Parameters:
-  ///   - id: The optional database identifier.
-  ///   - logger: The logger used for resolution.
-  /// - Returns: The resolved database.
-  public func db(_ id: DatabaseID?, logger: Logger) -> any Database {
-    if let database = self.databases.database(id, logger: logger) {
+  /// Resolves a StructuredQueries database by identifier with a custom logger.
+  public func structuredQueriesDB(_ id: DatabaseID?, logger: Logger) -> any Database {
+    if let database = self.structuredQueriesDatabases.database(id, logger: logger) {
       return database
     }
 
@@ -64,35 +113,35 @@ extension Application {
   }
 
   /// All configured database registries for this application.
-  public var databases: Databases {
+  public var structuredQueriesDatabases: Databases {
     self.database.storage.databases
   }
 
   /// The migration registry for this application.
-  public var migrations: Migrations {
+  public var structuredQueriesMigrations: Migrations {
     self.database.storage.migrations
   }
 
   /// The migrator for this application.
-  public var migrator: Migrator {
+  public var structuredQueriesMigrator: Migrator {
     .init(
-      databases: self.databases,
-      migrations: self.migrations,
+      databases: self.structuredQueriesDatabases,
+      migrations: self.structuredQueriesMigrations,
       logger: self.logger,
       migrationLogLevel: self.database.migrationLogLevel
     )
   }
 
   /// Runs all pending migrations.
-  public func autoMigrate() async throws {
-    try await self.migrator.setupIfNeeded()
-    try await self.migrator.prepareBatch()
+  public func structuredQueriesAutoMigrate() async throws {
+    try await self.structuredQueriesMigrator.setupIfNeeded()
+    try await self.structuredQueriesMigrator.prepareBatch()
   }
 
   /// Reverts all prepared migrations.
-  public func autoRevert() async throws {
-    try await self.migrator.setupIfNeeded()
-    try await self.migrator.revertAllBatches()
+  public func structuredQueriesAutoRevert() async throws {
+    try await self.structuredQueriesMigrator.setupIfNeeded()
+    try await self.structuredQueriesMigrator.revertAllBatches()
   }
 
   /// The VaporStructuredQueries application namespace.
@@ -133,12 +182,12 @@ extension Application {
 
         if signature.autoRevert {
           try application.eventLoopGroup.any().makeFutureWithTask {
-            try await application.autoRevert()
+            try await application.structuredQueriesAutoRevert()
           }.wait()
         }
         if signature.autoMigrate {
           try application.eventLoopGroup.any().makeFutureWithTask {
-            try await application.autoMigrate()
+            try await application.structuredQueriesAutoMigrate()
           }.wait()
         }
       }
@@ -147,19 +196,19 @@ extension Application {
         let signature = try Signature(from: &application.environment.commandInput)
 
         if signature.autoRevert {
-          try await application.autoRevert()
+          try await application.structuredQueriesAutoRevert()
         }
         if signature.autoMigrate {
-          try await application.autoMigrate()
+          try await application.structuredQueriesAutoMigrate()
         }
       }
 
       func shutdown(_ application: Application) {
-        application.databases.shutdown()
+        application.structuredQueriesDatabases.shutdown()
       }
 
       func shutdownAsync(_ application: Application) async {
-        application.databases.shutdown()
+        application.structuredQueriesDatabases.shutdown()
       }
     }
 

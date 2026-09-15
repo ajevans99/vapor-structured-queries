@@ -25,6 +25,12 @@ let package = Package(
       targets: ["VaporStructuredQueriesSQLite"]
     ),
   ],
+  traits: [
+    .trait(
+      name: "FluentCompatibility",
+      description: "Disable Fluent-colliding conveniences; use structuredQueries-prefixed APIs."
+    )
+  ],
   dependencies: [
     .package(url: "https://github.com/vapor/vapor.git", from: "4.115.0"),
     .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),

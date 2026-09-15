@@ -32,11 +32,11 @@ public final class MigrateCommand: AsyncCommand {
   public func run(using context: CommandContext, signature: Signature) async throws {
     if signature.revert {
       context.console.info("Migrate Command: Revert")
-      try await context.application.autoRevert()
+      try await context.application.structuredQueriesAutoRevert()
       context.console.info("Revert successful")
     } else {
       context.console.info("Migrate Command: Prepare")
-      try await context.application.autoMigrate()
+      try await context.application.structuredQueriesAutoMigrate()
       context.console.info("Migration successful")
     }
   }

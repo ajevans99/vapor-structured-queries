@@ -39,37 +39,37 @@ struct PostgresIntegrationTests {
         "CREATE TABLE \(quote: tableName) (\"id\" BIGINT PRIMARY KEY, \"title\" TEXT NOT NULL)",
         as: Void.self
       )
-      .execute(on: app.db)
+      .execute(on: app.structuredQueriesDB)
 
-      try await withTestTableCleanup(named: tableName, on: app.db) {
+      try await withTestTableCleanup(named: tableName, on: app.structuredQueriesDB) {
         try await #sql(
           "INSERT INTO \(quote: tableName) (\"id\", \"title\") VALUES (\(bind: 1), \(bind: titleToInsert))",
           as: Void.self
         )
-        .execute(on: app.db)
+        .execute(on: app.structuredQueriesDB)
 
         let title = try await #sql(
           "SELECT \"title\" FROM \(quote: tableName) WHERE \"id\" = \(bind: 1)",
           as: String.self
         )
-        .first(on: app.db)
+        .first(on: app.structuredQueriesDB)
         #expect(title == "Blob")
 
         try await #sql(
           "DELETE FROM \(quote: tableName) WHERE \"id\" = \(bind: 1)",
           as: Void.self
         )
-        .execute(on: app.db)
+        .execute(on: app.structuredQueriesDB)
 
         let count = try await #sql(
           "SELECT COUNT(*) FROM \(quote: tableName)",
           as: Int.self
         )
-        .first(on: app.db)
+        .first(on: app.structuredQueriesDB)
         #expect(count == 0)
       }
 
-      try await verifyTypedQueryFlow(on: app.db)
+      try await verifyTypedQueryFlow(on: app.structuredQueriesDB)
     }
   }
 
