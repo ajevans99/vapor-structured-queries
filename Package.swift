@@ -30,7 +30,7 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
     .package(
       url: "https://github.com/ajevans99/swift-structured-queries.git",
-      revision: "387e0da4b23af9bf6513fb6108e7084457bfacfc"
+      revision: "fe289c2e6462ebeba6f2c0e17df261ebe4b1ce62"
     ),
   ],
   targets: [
