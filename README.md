@@ -24,7 +24,7 @@ If you know [FluentKit](https://github.com/vapor/fluent-kit), the API style here
 ## Compatibility
 
 Requires Swift 6.1 or newer and macOS 13 or newer. StructuredQueries is pinned to
-[`ajevans99/swift-structured-queries` at `181cf5ec`](https://github.com/ajevans99/swift-structured-queries/commit/181cf5ece309934ab85340e546777af3ddf8bb06),
+[`ajevans99/swift-structured-queries` at `b4778832`](https://github.com/ajevans99/swift-structured-queries/commit/b477883237d21d6509ca97e9e6d54ada0f06f2b2),
 which incorporates upstream `a834ac78` while retaining the `StructuredQueriesPostgresNIO` product.
 The upstream-only package does not provide this bridge. Swift 6.4 uses the dependency's main
 manifest; Swift 6.1-6.3 uses its compatibility manifest. Both use the
