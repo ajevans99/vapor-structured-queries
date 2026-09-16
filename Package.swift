@@ -1,6 +1,12 @@
 // swift-tools-version: 6.1
 import PackageDescription
 
+#if os(Linux)
+  let sqlitePkgConfig: String? = "sqlite3"
+#else
+  let sqlitePkgConfig: String? = nil
+#endif
+
 let package = Package(
   name: "vapor-structured-queries",
   defaultLocalization: "en",
@@ -66,8 +72,14 @@ let package = Package(
       name: "VaporStructuredQueriesSQLite",
       dependencies: [
         .target(name: "VaporStructuredQueries"),
+        .target(name: "VaporStructuredQueriesCSQLite"),
         .product(name: "StructuredQueriesSQLite", package: "swift-structured-queries"),
       ]
+    ),
+    .systemLibrary(
+      name: "VaporStructuredQueriesCSQLite",
+      pkgConfig: sqlitePkgConfig,
+      providers: [.apt(["libsqlite3-dev"])]
     ),
     .testTarget(
       name: "VaporStructuredQueriesTests",

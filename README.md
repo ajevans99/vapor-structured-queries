@@ -23,13 +23,29 @@ If you know [FluentKit](https://github.com/vapor/fluent-kit), the API style here
 
 ## Compatibility
 
-Requires Swift 6.1 or newer and macOS 13 or newer. StructuredQueries is pinned to
+Requires Swift 6.1 or newer on macOS 13 or newer, or Linux. StructuredQueries is pinned to
 [`ajevans99/swift-structured-queries` at `181cf5ec`](https://github.com/ajevans99/swift-structured-queries/commit/181cf5ece309934ab85340e546777af3ddf8bb06),
 which incorporates upstream `a834ac78` while retaining the `StructuredQueriesPostgresNIO` product.
 The upstream-only package does not provide this bridge. Swift 6.4 uses the dependency's main
 manifest; Swift 6.1-6.3 uses its compatibility manifest. Both use the
 `xctest-dynamic-overlay` dependency identity and support CasePaths 1.8 to remain compatible with
 existing package graphs.
+
+### SQLite system dependency
+
+The SQLite adapter links the system SQLite library through a SwiftPM system-library target.
+On macOS, SQLite headers and the library are provided by the SDK; no extra installation is needed.
+On Linux, install SQLite development headers and `pkg-config` before building or running tests.
+For Debian and Ubuntu:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y libsqlite3-dev pkg-config
+```
+
+SwiftPM's package-provider metadata suggests the native package but does not install it.
+The system-library target supplies the Swift module; Linux does not need Apple's `SQLite3` module.
+The SQLite integration tests always run against an in-memory database and need no database server.
 
 ### Coexisting with Fluent
 
