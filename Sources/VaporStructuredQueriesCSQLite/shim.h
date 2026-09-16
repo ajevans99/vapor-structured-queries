@@ -1,0 +1,6 @@
+#ifndef VAPOR_STRUCTURED_QUERIES_C_SQLITE_H
+#define VAPOR_STRUCTURED_QUERIES_C_SQLITE_H
+
+#include <sqlite3.h>
+
+#endif

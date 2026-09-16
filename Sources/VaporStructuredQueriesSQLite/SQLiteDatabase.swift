@@ -1,7 +1,7 @@
 import Foundation
-import SQLite3
 import StructuredQueriesSQLite
 import VaporStructuredQueries
+import VaporStructuredQueriesCSQLite
 
 final class SQLiteDatabase: VaporStructuredQueries.Database, @unchecked Sendable {
   private let lock = NSLock()

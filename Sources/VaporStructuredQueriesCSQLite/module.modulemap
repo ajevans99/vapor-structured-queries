@@ -1,0 +1,5 @@
+module VaporStructuredQueriesCSQLite [system] {
+  header "shim.h"
+  link "sqlite3"
+  export *
+}
